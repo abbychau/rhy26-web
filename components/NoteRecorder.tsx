@@ -7,6 +7,9 @@ import { AudioPlayer } from './AudioPlayer'
 import { NoteTrack } from './NoteTrack'
 import { RecordedNotes } from './RecordedNotes'
 import { keyMap } from '../utils/keyMap'
+import { KeyManagementModal } from './KeyManagementModal'
+import { PencilIcon } from '@heroicons/react/24/solid'
+import { SongUploadModal } from './SongUploadModal'
 
 interface Note {
   time: number
@@ -20,8 +23,13 @@ export function NoteRecorder() {
   const [duration, setDuration] = useState(0)
   const [recordedNotes, setRecordedNotes] = useState<Note[]>([])
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [showKeyModal, setShowKeyModal] = useState(false)
+  const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [username, setUsername] = useState<string | null>(null)
+  const [userKeyHash, setUserKeyHash] = useState<string | null>(null)
+  const [showUploadModal, setShowUploadModal] = useState(false)
+  const [songs, setSongs] = useState<any[]>([])
   const audioRef = useRef<HTMLAudioElement>(null)
-  const startTimeRef = useRef<number>(0)
   const animationFrameRef = useRef<number>()
   const pressedKeys = useRef<Set<string>>(new Set())
 
@@ -29,14 +37,22 @@ export function NoteRecorder() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (keyMap.hasOwnProperty(e.key) && isPlaying && !pressedKeys.current.has(e.key)) {
         pressedKeys.current.add(e.key)
-        setRecordedNotes(prev => [...prev, { time: currentTime, key: e.key, type: 'keydown' }])
+        setRecordedNotes(prev => [...prev, { 
+          time: audioRef.current?.currentTime || 0,
+          key: e.key, 
+          type: 'keydown' 
+        }])
       }
     }
 
     const handleKeyUp = (e: KeyboardEvent) => {
       if (keyMap.hasOwnProperty(e.key) && isPlaying) {
         pressedKeys.current.delete(e.key)
-        setRecordedNotes(prev => [...prev, { time: currentTime, key: e.key, type: 'keyup' }])
+        setRecordedNotes(prev => [...prev, { 
+          time: audioRef.current?.currentTime || 0,
+          key: e.key, 
+          type: 'keyup' 
+        }])
       }
     }
 
@@ -46,15 +62,12 @@ export function NoteRecorder() {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [isPlaying, currentTime])
+  }, [isPlaying])
 
   useEffect(() => {
-    if (isPlaying) {
-      startTimeRef.current = performance.now() - (currentTime * 1000)
-      
+    if (isPlaying && audioRef.current) {
       const updateTimer = () => {
-        const elapsed = (performance.now() - startTimeRef.current) / 1000
-        setCurrentTime(elapsed)
+        setCurrentTime(audioRef.current?.currentTime || 0)
         animationFrameRef.current = requestAnimationFrame(updateTimer)
       }
       
@@ -66,17 +79,26 @@ export function NoteRecorder() {
         }
       }
     }
-  }, [currentTime, isPlaying])
+  }, [isPlaying])
+
+  useEffect(() => {
+    const storedKey = localStorage.getItem('userKey')
+    if (storedKey) {
+      verifyKey(storedKey)
+    } else {
+      setShowKeyModal(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchSongs()
+  }, [])
 
   const handlePlay = async () => {
     if (audioRef.current && selectedFile) {
       try {
-        audioRef.current.currentTime = 0
         await audioRef.current.play()
-        setCurrentTime(0) // Reset timer
-        startTimeRef.current = performance.now() // Reset start time
         setIsPlaying(true)
-        console.log('Audio playing, initial time:', audioRef.current.currentTime)
       } catch (error) {
         console.error('Error playing audio:', error)
         setIsPlaying(false)
@@ -102,8 +124,6 @@ export function NoteRecorder() {
     
     pressedKeys.current.clear()
     setRecordedNotes([])
-    setCurrentTime(0)
-    startTimeRef.current = performance.now()
     
     if (audioRef.current) {
       audioRef.current.currentTime = 0
@@ -124,12 +144,113 @@ export function NoteRecorder() {
     }
   }
 
-  const exportNotes = () => {
+  const exportNotes = async () => {
+    const key = localStorage.getItem('userKey')
+    if (!key) {
+      alert('Please generate a key first!')
+      return
+    }
+
     const noteString = recordedNotes
       .map(note => `${note.time.toFixed(6)}:${note.type === 'keydown' ? '0' : '1'}:${note.key}`)
       .join('\n')
-    navigator.clipboard.writeText(noteString)
-    alert('Note chart copied to clipboard!')
+
+    const formData = new FormData()
+    formData.append('key', key)
+    formData.append('title', selectedFile?.name || 'Untitled')
+    formData.append('music', selectedFile as File)
+    formData.append('notes', noteString)
+
+    try {
+      const response = await fetch('/api/records', {
+        method: 'POST',
+        body: formData
+      })
+      
+      if (response.ok) {
+        alert('Record saved successfully!')
+      } else {
+        throw new Error('Failed to save record')
+      }
+    } catch (error) {
+      alert('Error saving record: ' + error)
+    }
+  }
+
+  const generateKey = async () => {
+    try {
+      const response = await fetch('/api/auth', {
+        method: 'POST'
+      })
+      const { key, keyHash } = await response.json()
+      localStorage.setItem('userKey', key)
+      setUserKeyHash(keyHash)
+      setIsLoggedIn(true)
+      return key
+    } catch (error) {
+      alert('Error generating key: ' + error)
+      return ''
+    }
+  }
+
+  const updateUsername = async () => {
+    const key = localStorage.getItem('userKey')
+    if (!key) {
+      alert('Please generate a key first!')
+      return
+    }
+
+    const username = prompt('Enter your desired username:')
+    if (!username) return
+
+    try {
+      const response = await fetch('/api/auth', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, username })
+      })
+      
+      const data = await response.json()
+      
+      if (response.ok) {
+        setUsername(username)
+        alert('Username set successfully!')
+      } else if (data.code === 'USERNAME_TAKEN') {
+        alert('This username is already taken. Please choose a different one.')
+      } else {
+        throw new Error(data.error || 'Failed to set username')
+      }
+    } catch (error) {
+      alert('Error setting username: ' + error)
+    }
+  }
+
+  const verifyKey = async (key: string) => {
+    try {
+      const response = await fetch(`/api/auth?key=${key}`)
+      const data = await response.json()
+      
+      if (data.success) {
+        setIsLoggedIn(true)
+        setUsername(data.username)
+        setShowKeyModal(false)
+        localStorage.setItem('userKey', key)
+      } else {
+        throw new Error(data.error)
+      }
+    } catch (error) {
+      console.error('Error verifying key:', error)
+      alert('Invalid key')
+      localStorage.removeItem('userKey')
+      setShowKeyModal(true)
+    }
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('userKey')
+    setIsLoggedIn(false)
+    setUsername(null)
+    setShowKeyModal(true)
   }
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -152,12 +273,108 @@ export function NoteRecorder() {
     }
   }
 
+  const submitChart = async () => {
+    const key = localStorage.getItem('userKey')
+    if (!key) {
+      alert('Please generate a key first!')
+      return
+    }
+
+    try {
+      const response = await fetch('/api/charts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key,
+          musicPath: selectedFile?.name,
+          noteData: recordedNotes.map(note => 
+            `${note.time.toFixed(6)}:${note.type === 'keydown' ? '0' : '1'}:${note.key}`
+          ).join('\n')
+        })
+      })
+
+      if (response.ok) {
+        alert('Note chart submitted successfully!')
+      } else {
+        throw new Error('Failed to submit note chart')
+      }
+    } catch (error) {
+      alert('Error submitting note chart: ' + error)
+    }
+  }
+
+  const fetchSongs = async () => {
+    try {
+      const response = await fetch('/api/songs')
+      const data = await response.json()
+      console.log('Fetched songs:', data)
+      setSongs(data)
+    } catch (error) {
+      console.error('Failed to fetch songs:', error)
+    }
+  }
+
   return (
     <div className="p-4 pr-[400px]">
-      <h1 className="text-2xl font-bold mb-4">RHY26 Music Note Recorder</h1>
+      {showKeyModal && (
+        <KeyManagementModal
+          onLogin={verifyKey}
+          onGenerateKey={generateKey}
+        />
+      )}
+      {showUploadModal && (
+        <SongUploadModal
+          onClose={() => setShowUploadModal(false)}
+          onUpload={() => {
+            fetchSongs()
+            setShowUploadModal(false)
+          }}
+        />
+      )}
+      <div className="flex justify-between items-center mb-4">
+        <h1 className="text-2xl font-bold">RHY26 Music Note Recorder</h1>
+        {isLoggedIn && (
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span>{username || 'Anonymous'}</span>
+              <button 
+                onClick={updateUsername}
+                className="p-1 hover:bg-gray-100 rounded-full"
+                title="Set Username"
+              >
+                <PencilIcon className="w-4 h-4 text-gray-600" />
+              </button>
+            </div>
+            <Button onClick={handleLogout}>Logout</Button>
+          </div>
+        )}
+      </div>
       <div className="mb-4">
-        <Input type="file" accept="audio/*" onChange={handleFileChange} className="mb-2" />
-        {selectedFile && <p className="text-sm text-gray-600">Selected file: {selectedFile.name}</p>}
+        <h2 className="text-lg font-semibold mb-2">Select Song</h2>
+        <div className="flex gap-2">
+          <select 
+            className="flex-1 border rounded p-2"
+            onChange={(e) => {
+              const song = songs.find(s => s.id === parseInt(e.target.value))
+              if (song) {
+                // Handle song selection
+              }
+            }}
+          >
+            <option value="">Select a song from library</option>
+            {songs.map(song => (
+              <option key={song.id} value={song.id}>
+                {song.title} by {song.author} (uploaded by {song.uploader || 'Anonymous'})
+              </option>
+            ))}
+          </select>
+          <Button onClick={() => setShowUploadModal(true)}>Upload New Song</Button>
+        </div>
+        
+        <div className="mt-4">
+          <p className="text-sm text-gray-600 mb-2">Or use a local file:</p>
+          <Input type="file" accept="audio/*" onChange={handleFileChange} />
+        </div>
       </div>
       <AudioPlayer
         ref={audioRef}
@@ -169,6 +386,12 @@ export function NoteRecorder() {
         <Button onClick={handlePause} disabled={!isPlaying}>Pause</Button>
         <Button onClick={handleReRecord} disabled={!selectedFile}>Re-Record</Button>
         <Button onClick={exportNotes} disabled={recordedNotes.length === 0}>Export Notes</Button>
+        <Button 
+          onClick={submitChart} 
+          disabled={!isLoggedIn || recordedNotes.length === 0}
+        >
+          Submit Chart
+        </Button>
       </div>
       <div className="mb-4">
         Time: {currentTime.toFixed(2)} / {duration.toFixed(2)}
